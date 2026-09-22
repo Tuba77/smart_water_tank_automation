@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smart Water Tank — Monitoring Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #EDF1F5;
+    --panel: #FFFFFF;
+    --border: #D6DDE5;
+    --text: #16212E;
+    --muted: #66768A;
+    --accent: #0B5FBF;
+    --normal: #157F45;
+    --warning: #A85B00;
+    --critical: #C2273D;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background:
+      linear-gradient(var(--bg), var(--bg)),
+      repeating-linear-gradient(0deg, rgba(11,95,191,0.05) 0 1px, transparent 1px 32px),
+      repeating-linear-gradient(90deg, rgba(11,95,191,0.05) 0 1px, transparent 1px 32px);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 24px;
+  }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; }
+
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px 0; }
+  .subtitle { color: var(--muted); font-size: 13px; margin: 0 0 8px 0; }
+  .conn-row { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--normal); }
+  .dot.down { background: var(--critical); }
+
+  .status-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .stat-card { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); padding: 16px 16px 16px 14px; }
+  .stat-card.status-normal { border-left-color: var(--normal); }
+  .stat-card.status-warning { border-left-color: var(--warning); }
+  .stat-card.status-critical { border-left-color: var(--critical); }
+  .stat-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .stat-value { font-size: 28px; font-weight: 600; }
+  .stat-unit { font-size: 13px; color: var(--muted); margin-left: 4px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 13px; font-weight: 600; }
+  .badge.normal { background: rgba(21,127,69,0.10); color: var(--normal); }
+  .badge.warning { background: rgba(168,91,0,0.10); color: var(--warning); }
+  .badge.critical { background: rgba(194,39,61,0.10); color: var(--critical); }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); padding: 16px; margin-bottom: 20px; }
+  .panel-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  canvas { max-height: 280px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+
+  .pump-on { color: var(--normal); }
+  .pump-off { color: var(--muted); }
+</style>
+</head>
+<body>
+
+  <h1>Smart Water Tank — Live Monitoring</h1>
+  <p class="subtitle">Pressure &amp; water level, ESP32 feed via Flask backend</p>
+  <div class="conn-row"><span class="dot" id="connDot"></span><span id="connText">Connecting…</span></div>
+
+  <div class="status-strip">
+    <div class="stat-card" id="levelCard">
+      <div class="stat-label">Water Level</div>
+      <div class="stat-value mono" id="levelValue">--<span class="stat-unit">%</span></div>
+    </div>
+    <div class="stat-card" id="pressureCard">
+      <div class="stat-label">Pressure</div>
+      <div class="stat-value mono" id="pressureValue">--<span class="stat-unit">PSI</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Pump</div>
+      <div class="stat-value" id="pumpValue">--</div>
+    </div>
+    <div class="stat-card" id="statusCard">
+      <div class="stat-label">System Status</div>
+      <div class="stat-value"><span class="badge normal" id="statusBadge">NORMAL</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Live Readings</div>
+    <canvas id="liveChart"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Event Log</div>
+    <table>
+      <thead><tr><th>Time</th><th>Level</th><th>Pressure</th><th>Pump</th><th>Status</th></tr></thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+
+<script>
+/* Backend base URL. Empty string = same origin (works because Flask serves
+   this file too). If you ever host the dashboard separately, put the full
+   backend URL here instead, e.g. 'https://your-app.onrender.com' */
+const API_BASE = '';
+
+const MAX_POINTS = 20;
+const levelData = [];
+const pressureData = [];
+const labels = [];
+
+const chart = new Chart(document.getElementById('liveChart'), {
+  type: 'line',
+  data: {
+    labels: labels,
+    datasets: [
+      { label: 'Water Level (%)', data: levelData, borderColor: '#0B5FBF',
+        backgroundColor: 'rgba(11,95,191,0.08)', tension: 0.3, fill: true, yAxisID: 'y' },
+      { label: 'Pressure (PSI)', data: pressureData, borderColor: '#A85B00',
+        backgroundColor: 'rgba(168,91,0,0.08)', tension: 0.3, fill: true, yAxisID: 'y1' }
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      y: { position: 'left', min: 0, max: 100, grid: { color: '#D6DDE5' }, ticks: { color: '#66768A' } },
+      y1: { position: 'right', min: 0, max: 100, grid: { drawOnChartArea: false }, ticks: { color: '#66768A' } },
+      x: { grid: { color: '#D6DDE5' }, ticks: { color: '#66768A' } }
+    },
+    plugins: { legend: { labels: { color: '#16212E' } } }
+  }
+});
+
+function setConn(state) {
+  const dot = document.getElementById('connDot');
+  const txt = document.getElementById('connText');
+  dot.className = 'dot ' + state;
+  txt.textContent = state === 'live' ? 'Live — connected to backend'
+    : state === 'down' ? 'Backend unreachable — retrying…'
+    : 'Connecting…';
+}
+
+function updateUI(reading) {
+  const { level, pressure, pump_status, timestamp, status } = reading;
+
+  document.getElementById('levelValue').innerHTML = level.toFixed(1) + '<span class="stat-unit">%</span>';
+  document.getElementById('pressureValue').innerHTML = pressure.toFixed(1) + '<span class="stat-unit">PSI</span>';
+  document.getElementById('pumpValue').innerHTML =
+    `<span class="${pump_status === 'ON' ? 'pump-on' : 'pump-off'}">${pump_status}</span>`;
+
+  const badge = document.getElementById('statusBadge');
+  badge.className = 'badge ' + status;
+  badge.textContent = status.toUpperCase();
+
+  document.getElementById('statusCard').className = 'stat-card status-' + status;
+  document.getElementById('levelCard').className = 'stat-card' + (level < 25 ? ' status-warning' : '');
+  document.getElementById('pressureCard').className = 'stat-card' + (pressure > 65 || pressure < 10 ? ' status-warning' : '');
+
+  labels.push(timestamp);
+  levelData.push(level);
+  pressureData.push(pressure);
+  if (labels.length > MAX_POINTS) { labels.shift(); levelData.shift(); pressureData.shift(); }
+  chart.update();
+
+  if (status !== 'normal') {
+    const row = document.createElement('tr');
+    row.innerHTML = `
+      <td class="mono">${timestamp}</td>
+      <td class="mono">${level.toFixed(1)}%</td>
+      <td class="mono">${pressure.toFixed(1)} PSI</td>
+      <td>${pump_status}</td>
+      <td><span class="badge ${status}">${status.toUpperCase()}</span></td>`;
+    const logBody = document.getElementById('logBody');
+    logBody.prepend(row);
+    while (logBody.children.length > 10) logBody.removeChild(logBody.lastChild);
+  }
+}
+
+async function fetchLatest() {
+  try {
+    const res = await fetch(`${API_BASE}/api/latest`);
+    if (!res.ok) throw new Error('bad status ' + res.status);
+    const reading = await res.json();
+    setConn('live');
+    updateUI(reading);
+  } catch (err) {
+    setConn('down');
+    console.error('Failed to fetch latest reading:', err);
+  }
+}
+
+setInterval(fetchLatest, 2000);
+fetchLatest();
+</script>
+</body>
+</html>
